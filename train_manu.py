@@ -1,6 +1,5 @@
 import torch
 import argparse
-import ipdb
 import os
 from torch.utils.data import Dataset, DataLoader
 import sys
@@ -19,8 +18,8 @@ import ipdb
 import logging
 import wandb
 
-use_log = True
-save_ckpt = True
+use_log = False
+save_ckpt = False
 
 
 def open_pickle(path):
@@ -46,14 +45,62 @@ def init_wandb(args):
     # wandb.run.name = config["wandb_run_name"]
     wandb.run.name = config["wandb_run_name"]
 
-# dataset : wrap the data in a dictionary with index as keys. Dataloader fetches it through sampler.
+
+class Summary():
+    NONE = 0
+    AVERAGE = 1
+    SUM = 2
+    COUNT = 3
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self, name, fmt=':f', summary_type=Summary.AVERAGE):
+        self.name = name
+        self.fmt = fmt
+        self.summary_type = summary_type
+        self.val_history = list()
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+        self.val_history = list()
+
+    def update(self, val, n=1):
+      #n : batch size
+      #val :avg loss
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+        self.val_history.append(val) # maintaining a list of val losses.
+
+    def __str__(self):
+        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
+
+    def summary(self):
+        fmtstr = ''
+        if self.summary_type is Summary.NONE:
+            fmtstr = ''
+        elif self.summary_type is Summary.AVERAGE:
+            fmtstr = '{name} {avg:.3f}'
+        elif self.summary_type is Summary.SUM:
+            fmtstr = '{name} {sum:.3f}'
+        elif self.summary_type is Summary.COUNT:
+            fmtstr = '{name} {count:.3f}'
+        else:
+            raise ValueError('invalid summary type %r' % self.summary_type)
+        return fmtstr.format(**self.__dict__)
 
 class CocoDataset(Dataset):
-    #return clip embedding 
-    # also return corresponding tokenzied caption. It will be fed during teacher forcing.
-
-    #mask : tokens and zeros
-
+    """
+    inputs : data dict--> RN50 clip embeddings, corresponding captions.
+    returns : clip embedding, tokenzied caption, mask (over prefix,tokens and padding)
+    """
+    
     def __init__(self, data_path, prefix_len, norm_prefix, tokenizer = "gpt2",normalize_prefix = False):
         self.data = open_pickle(data_path)
         self.clip_embed = self.data['clip_embedding']
@@ -61,11 +108,12 @@ class CocoDataset(Dataset):
         self.tokenizer = GPT2Tokenizer.from_pretrained(tokenizer)
         self.prefix_len = prefix_len
         self.norm_prefix = norm_prefix
+        self.split = data_path.split("_")[-1][:-4]
                 
         #dataset needs to be arranged so a given 'idx' --> clip_embed of image, tokenized caption.
         # cannot tokenize everytime. Too expensive.
 
-        self.indexed_dataset_path = f"/ssd_scratch/cvit/manu/clip_cap_manu/tokens_clip_data.pkl"
+        self.indexed_dataset_path = f"/ssd_scratch/cvit/manu/clip_cap_manu/{self.   split}_caption_tokens.pkl"
         if os.path.isfile(self.indexed_dataset_path):
             print("loading data.... ")
             self.tokenized_captions, self.max_len_token = open_pickle(self.indexed_dataset_path)
@@ -80,7 +128,7 @@ class CocoDataset(Dataset):
                 self.tokenized_captions.append(tokens)
                 token_len_list.append(tokens.shape[-1])
             
-            all_len = torch.tensor(self.token_len_list, dtype = torch.float)
+            all_len = torch.tensor(token_len_list, dtype = torch.float)
             self.max_len_token = min(all_len.mean() + 10*(all_len.std()), all_len.max())
 
             dump_pickle((self.tokenized_captions, self.max_len_token), self.indexed_dataset_path)
@@ -121,8 +169,6 @@ class CocoDataset(Dataset):
             prefix = prefix/prefix.norm(2,-1) # L2 norm along the last dimension
         
         return prefix, padded_tokens, mask
-
-
 
 
 class MlpTransformer(nn.Module):
@@ -235,22 +281,21 @@ class Transformer(nn.Module):
 
 class Model(nn.Module):
 
-    def __init__(self, clip_dim,prefix_len, const_len,num_layers):
+    def __init__(self, clip_dim,prefix_len, const_len,num_layers,only_projection = False):
         super().__init__()
         self.clip_dim = clip_dim
         self.prefix_len = prefix_len
         self.const_len = const_len
-
+        self.only_projection = only_projection
         self.gpt = GPT2LMHeadModel.from_pretrained('gpt2')
         self.gpt_dim = self.gpt.transformer.wte.weight.shape[1]     #token embedding weight.shape
         self.linear = nn.Linear(self.clip_dim,self.prefix_len*(self.gpt_dim))
         self.learnable_const = nn.Parameter(torch.randn(self.const_len, self.gpt_dim), requires_grad=True)
         self.transformer = Transformer(self.gpt_dim, 8, num_layers)  #token_embedding, attn_heads, num_blocks
         
-    def forward(self, clip_embed, tokens, mask):
+    def forward(self, clip_embed, tokens = None, mask = None):
         #prefix --> linear layer --> transformer --> output + caption tokens --> gpt        
         
-
         x = self.linear(clip_embed.to(torch.float32)).view(clip_embed.shape[0],self.prefix_len, -1) # (B,K,gpt_dim)
         #concat learnable constant and clip embedding mapped to gpt space
         learnable_const = self.learnable_const.unsqueeze(0).expand(clip_embed.shape[0],*self.learnable_const.shape) # (B,K,gpt_dim)
@@ -258,13 +303,17 @@ class Model(nn.Module):
         x = torch.cat((x,learnable_const),dim = 1) # (B,2K,gpt_dim)
         # improve the mapping in the gpt space using a transformer. Also encode image info in learnable constant through attention.
         x = self.transformer(x)[:,self.prefix_len:]
-        # feed the gpt (learnable constant + tokenized_caption)
-        token_embed = self.gpt.transformer.wte(tokens)    # (vocab_size, token_embedding=768) --> (B,T, 768)
         
+        if self.only_projection:
+            return x 
+        
+        # feed the gpt (learnable constant + tokenized_caption)
+        token_embed = self.gpt.transformer.wte(tokens)    # (vocab_size, token_embedding=768) --> (B,T, 768)        
         x = torch.cat((x,token_embed),dim = 1)
-        out = self.gpt(inputs_embeds = x,attention_mask = mask)
 
-        return out 
+        out = self.gpt(inputs_embeds = x, attention_mask = mask)
+
+        return out
 
 def save_config(args: argparse.Namespace):
     config = {}
@@ -274,6 +323,19 @@ def save_config(args: argparse.Namespace):
     with open(out_path, 'w') as outfile:
         json.dump(config, outfile)
 
+
+@torch.no_grad()
+def evaluate(model, val_dataloader,val_dataset, device):
+    model.eval()
+    loss_meter = AverageMeter("eval_loss", ":.5f")
+    for prefix, tokens, mask in val_dataloader:
+        tokens, mask, prefix = tokens.to(device), mask.to(device), prefix.to(device, dtype=torch.float32)
+        #get the class idx for each instance in the batch.
+        outputs = model(prefix,tokens, mask)
+        logits = outputs.logits[:, val_dataset.prefix_len - 1: -1]
+        loss = nnf.cross_entropy(logits.reshape(-1, logits.shape[-1]), tokens.to(torch.long).flatten(), ignore_index=0)
+        loss_meter.update(loss.item(), tokens.shape[0])
+        return loss_meter
 
 def load_model(config_path: str, epoch_or_latest: Union[str, int] = '_latest'):
     with open(config_path) as f:
@@ -296,7 +358,7 @@ def load_model(config_path: str, epoch_or_latest: Union[str, int] = '_latest'):
     return model, parser
 
 
-def train(dataset, model, args, warmup_steps= 5000, output_dir = ".", output_prefix = ""):
+def train(train_dataset, val_dataset, model, args, warmup_steps= 5000, output_dir = ".", output_prefix = ""):
 
     device = torch.device('cuda:0')
     batch_size = args.bs
@@ -305,8 +367,10 @@ def train(dataset, model, args, warmup_steps= 5000, output_dir = ".", output_pre
         os.makedirs(output_dir)
     model = model.to(device)
     model.train()
+    loss_meter = AverageMeter("train_loss", ":.5f")
     optimizer = AdamW(model.parameters(), lr=args.lr)
-    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     ####
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=epochs * len(train_dataloader)
@@ -316,37 +380,42 @@ def train(dataset, model, args, warmup_steps= 5000, output_dir = ".", output_pre
         print(f">>> Training epoch {epoch}")
         sys.stdout.flush()
         ####
-        progress = tqdm(total=len(train_dataloader), desc=output_prefix)
+        # progress = tqdm(total=len(train_dataloader), desc=output_prefix)
         for idx, (prefix, tokens, mask) in enumerate(train_dataloader):
-            ###
+            ### optimizer zero grad????
             model.zero_grad()
             tokens, mask, prefix = tokens.to(device), mask.to(device), prefix.to(device, dtype=torch.float32)
             outputs = model(prefix,tokens, mask)
-            logits = outputs.logits[:, dataset.prefix_len - 1: -1]
+            logits = outputs.logits[:, train_dataset.prefix_len - 1: -1]
             ####
             loss = nnf.cross_entropy(logits.reshape(-1, logits.shape[-1]), tokens.to(torch.long).flatten(), ignore_index=0)
-
-            ####
+            loss_meter.update(loss.item(), tokens.shape[0])
             loss.backward()
             optimizer.step()
-            if use_log: 
-                data_to_log = {
+            
+            #Calculate validation loss 
+            val_loss_meter = evaluate(model, val_dataloader, val_dataset, device)
+            data_to_log = {
                 "epoch": epoch+1,
-                "train_loss": loss.item(),
+                "train_loss": loss_meter.avg,
+                "val_loss": val_loss_meter.avg,
                 "lr": optimizer.state_dict()["param_groups"][0]["lr"],
                 }
+            if use_log: 
                 wandb.log(data_to_log)
                 logging.info(data_to_log)
+            print(data_to_log)
             scheduler.step()
             optimizer.zero_grad()
-            progress.set_postfix({"loss": loss.item()})
-            progress.update()
+            # progress.set_postfix({"loss": loss.item()})
+            # progress.update()
             # if (idx + 1) % 10000 == 0:
             #     torch.save(
             #         model.state_dict(),
             #         os.path.join(output_dir, f"{output_prefix}_latest.pt"),
             #     )
-        progress.close()
+        # progress.close()
+        print(data_to_log)
         if save_ckpt:
             if epoch % args.save_every == 0 or epoch == epochs - 1:
                 torch.save(
@@ -360,7 +429,8 @@ def train(dataset, model, args, warmup_steps= 5000, output_dir = ".", output_pre
 def main():
     parser = argparse.ArgumentParser() #create Argument Parser object
     # data
-    parser.add_argument('--data', default='/ssd_scratch/cvit/manu/clip_cap/oscar_split_RN50_train.pkl')
+    parser.add_argument('--train_data', default='/ssd_scratch/cvit/manu/clip_cap/oscar_split_RN50_train.pkl')
+    parser.add_argument('--val_data', default='/ssd_scratch/cvit/manu/clip_cap/oscar_split_RN50_val.pkl')
     parser.add_argument('--out_dir', default='/ssd_scratch/cvit/manu/clip_cap_manu/checkpoints')
     #hyperparams
     parser.add_argument('--prefix', default='coco_prefix', help='prefix for saved filenames')
@@ -369,7 +439,7 @@ def main():
     parser.add_argument('--prefix_length', type=int, default=10)
     parser.add_argument('--lr', type=float, default=2e-5)
     parser.add_argument('--prefix_length_clip', type=int, default=10)
-    parser.add_argument('--bs', type=int, default=40)
+    parser.add_argument('--bs', type=int, default=32)
     parser.add_argument('--only_prefix', default = True, dest='only_prefix', action='store_true')
     parser.add_argument('--mapping_type', type=str, default='mlp', help='mlp/transformer')
     parser.add_argument('--num_layers', type=int, default=8)
@@ -385,9 +455,10 @@ def main():
 
     prefix_dim = 1024 # resnet 50
     #moose
-    dataset = CocoDataset(args.data, args.prefix_length,args.normalize_prefix)
+    train_dataset = CocoDataset(args.train_data, args.prefix_length,args.normalize_prefix)
+    val_dataset = CocoDataset(args.val_data, args.prefix_length,args.normalize_prefix)
     model = Model(clip_dim = prefix_dim, prefix_len = args.prefix_length, const_len =args.prefix_length_clip, num_layers = args.num_layers)
-    train(dataset, model, args, output_dir=args.out_dir, output_prefix=args.prefix)
+    train(train_dataset,val_dataset,model, args, output_dir=args.out_dir, output_prefix=args.prefix)
 
 
 if __name__ == '__main__':
@@ -397,7 +468,9 @@ if __name__ == '__main__':
 
  Why self.caption_tokens[idx] = tokens ::::: here padding is -1
 
-mask = torch.cat((torch.ones(self.prefix_length), mask), dim=0)  ::::why dim=0
+validation:
+no grad training loop.
+model.eval
 
 """
 

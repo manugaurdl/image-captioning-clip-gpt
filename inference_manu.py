@@ -177,19 +177,19 @@ class Transformer(nn.Module):
 
 class Model(nn.Module):
 
-    def __init__(self, clip_dim,prefix_len, const_len,num_layers):
+    def __init__(self, clip_dim,prefix_len, const_len,num_layers,only_projection = False):
         super().__init__()
         self.clip_dim = clip_dim
         self.prefix_len = prefix_len
         self.const_len = const_len
-
+        self.only_projection = only_projection
         self.gpt = GPT2LMHeadModel.from_pretrained('gpt2')
         self.gpt_dim = self.gpt.transformer.wte.weight.shape[1]     #token embedding weight.shape
         self.linear = nn.Linear(self.clip_dim,self.prefix_len*(self.gpt_dim))
         self.learnable_const = nn.Parameter(torch.randn(self.const_len, self.gpt_dim), requires_grad=True)
         self.transformer = Transformer(self.gpt_dim, 8, num_layers)  #token_embedding, attn_heads, num_blocks
         
-    def forward(self, clip_embed, tokens = None, mask = None, only_projection = False):
+    def forward(self, clip_embed, tokens = None, mask = None):
         #prefix --> linear layer --> transformer --> output + caption tokens --> gpt        
         
         x = self.linear(clip_embed.to(torch.float32)).view(clip_embed.shape[0],self.prefix_len, -1) # (B,K,gpt_dim)
@@ -200,7 +200,7 @@ class Model(nn.Module):
         # improve the mapping in the gpt space using a transformer. Also encode image info in learnable constant through attention.
         x = self.transformer(x)[:,self.prefix_len:]
         
-        if only_projection:
+        if self.only_projection:
             return x 
         
         # feed the gpt (learnable constant + tokenized_caption)
@@ -385,7 +385,7 @@ def generate2(
 with torch.no_grad():
 
 
-    model = Model(clip_dim = prefix_dim, prefix_len = prefix_length, const_len =prefix_length_clip, num_layers = num_layers)
+    model = Model(clip_dim = prefix_dim, prefix_len = prefix_length, const_len =prefix_length_clip, num_layers = num_layers,only_projection =True)
 
     model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
     model = model.eval()
@@ -396,7 +396,7 @@ with torch.no_grad():
     prefix = prefix / prefix.norm(2, -1).item()
 
     # Get prefix using mapping network
-    prefix_embed = model(prefix,only_projection = True).reshape(1, prefix_length, -1)
+    prefix_embed = model(prefix).reshape(1, prefix_length, -1)
     
     if use_beam_search:
         generated_text_prefix = generate_beam(model, tokenizer, embed=prefix_embed)[0]

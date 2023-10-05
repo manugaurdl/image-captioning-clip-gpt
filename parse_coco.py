@@ -12,15 +12,16 @@ import argparse
 def main(args):
     clip_model_type = args.clip_model_type
     data_dir = args.data_dir
+    split = args.split
     device = torch.device('cuda:0')
     clip_model_name = clip_model_type.replace('/', '_')
 
     #
-    out_path = os.path.join(data_dir,f"oscar_split_{clip_model_name}_train.pkl")
+    out_path = os.path.join(data_dir,f"oscar_split_{clip_model_name}_{split}.pkl")
     clip_model, preprocess = clip.load(clip_model_type, device=device, jit=False)
-    with open('/home2/manugaur/CLIP_prefix_caption/data/coco/annotations/train_caption.json', 'r') as f:
+    with open(f'/ssd_scratch/cvit/manu/clip_cap/annotations/{split}_caption.json', 'r') as f:
         data = json.load(f)
-    print("%0d captions loaded from json " % len(data))
+    print(f"%0d captions loaded from {split} json " % len(data))
     
     
     all_embeddings = [] # all images clip embeddings stored 
@@ -56,6 +57,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--clip_model_type', default="RN50", choices=('RN50', 'RN101', 'RN50x4', 'ViT-B/32'))
     parser.add_argument('--data_dir', default="/ssd_scratch/cvit/manu/clip_cap/")
+    parser.add_argument('--split', type = str, default = "val")
     
     args = parser.parse_args()
     exit(main(args))
