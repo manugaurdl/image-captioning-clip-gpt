@@ -23,7 +23,7 @@ import PIL.Image
 
 #params:
 use_beam_search = False #@param {type:"boolean"}
-img_path = "/ssd_scratch/cvit/manu/clip_cap/val2014/COCO_val2014_000000290839.jpg"
+img_path = "/ssd_scratch/cvit/manu/clip_cap/COCO_val2014_000000290839.jpg"
 model_path = "/ssd_scratch/cvit/manu/clip_cap_manu/checkpoints/coco_prefix-009.pt"
 prefix_dim = 1024
 prefix_length = 10
@@ -36,7 +36,6 @@ else:
     device = torch.device("cpu")
 
 prefix_length = 10 
-
 
 #load model
 clip_model, preprocess = clip.load("RN50", device=device, jit=False) #colab
@@ -174,7 +173,6 @@ class Transformer(nn.Module):
         self.layers = nn.ModuleList(layers)
 
 
-
 class Model(nn.Module):
 
     def __init__(self, clip_dim,prefix_len, const_len,num_layers,only_projection = False):
@@ -213,8 +211,6 @@ class Model(nn.Module):
 
 
 #main predict class with forward
- 
-
 
 def generate_beam(model, tokenizer, beam_size: int = 5, prompt=None, embed=None,
                   entry_length=67, temperature=1., stop_token: str = '.'):
@@ -314,6 +310,7 @@ def generate2(
             for i in range(entry_length):
 
                 outputs = model.gpt(inputs_embeds=generated)
+                # logits for next token is a distribution over vocab_size. Can sample a token from it and decode it into a word. 
                 logits = outputs.logits
 
                 # Using the output of time step and concatenating it with previous outputs. this (generated) is fed to gpt at next time step. 
@@ -323,21 +320,15 @@ def generate2(
                 logits = logits[:, -1, :] / (temperature if temperature > 0 else 1.0)  # (B, T, vocab_size)
                
                # ----------------------------
-                # """
                 # TAKING THE LARGEST LOGIT
                 # next_token = torch.argmax(logits, dim = -1).unsqueeze(0)
 
-                # """
                 # ----------------------------
-               
-                # """                
                 # torch.multinomial
-
                 probs = torch.nn.functional.softmax(logits, dim=-1) # (B, C)
                 # sample from the distribution
                 next_token = torch.multinomial(probs, num_samples=1) # (B, 1)
                 
-                # """
                # ---------------------------- 
                 """
                 THEIR IMPLEMENTATION
@@ -384,10 +375,9 @@ def generate2(
 
 with torch.no_grad():
 
-
     model = Model(clip_dim = prefix_dim, prefix_len = prefix_length, const_len =prefix_length_clip, num_layers = num_layers,only_projection =True)
 
-    model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
+    # model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
     model = model.eval()
     model = model.to(device)  
 

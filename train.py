@@ -101,7 +101,7 @@ class CocoDataset(Dataset):
     returns : clip embedding, tokenzied caption, mask (over prefix,tokens and padding)
     """
     
-    def __init__(self, data_path, prefix_len, norm_prefix, tokenizer = "gpt2",normalize_prefix = False):
+    def __init__(self, data_path, prefix_len, norm_prefix, tokenizer = "gpt2"):
         self.data = open_pickle(data_path)
         self.clip_embed = self.data['clip_embedding']
         self.meta_data = self.data['captions']
@@ -113,7 +113,7 @@ class CocoDataset(Dataset):
         #dataset needs to be arranged so a given 'idx' --> clip_embed of image, tokenized caption.
         # cannot tokenize everytime. Too expensive.
 
-        self.indexed_dataset_path = f"/ssd_scratch/cvit/manu/clip_cap_manu/{self.   split}_caption_tokens.pkl"
+        self.indexed_dataset_path = f"/ssd_scratch/cvit/manu/clip_cap_manu/{self.split}_caption_tokens.pkl"
         if os.path.isfile(self.indexed_dataset_path):
             print("loading data.... ")
             self.tokenized_captions, self.max_len_token = open_pickle(self.indexed_dataset_path)
@@ -129,6 +129,8 @@ class CocoDataset(Dataset):
                 token_len_list.append(tokens.shape[-1])
             
             all_len = torch.tensor(token_len_list, dtype = torch.float)
+            #max = 182
+            
             self.max_len_token = min(all_len.mean() + 10*(all_len.std()), all_len.max())
 
             dump_pickle((self.tokenized_captions, self.max_len_token), self.indexed_dataset_path)
@@ -302,7 +304,7 @@ class Model(nn.Module):
 
         x = torch.cat((x,learnable_const),dim = 1) # (B,2K,gpt_dim)
         # improve the mapping in the gpt space using a transformer. Also encode image info in learnable constant through attention.
-        x = self.transformer(x)[:,self.prefix_len:]
+        x = self.transformer(x)[:,self.const_len:]
         
         if self.only_projection:
             return x 
@@ -360,7 +362,7 @@ def load_model(config_path: str, epoch_or_latest: Union[str, int] = '_latest'):
 
 def train(train_dataset, val_dataset, model, args, warmup_steps= 5000, output_dir = ".", output_prefix = ""):
 
-    device = torch.device('cuda:0')
+    device = torch.device('cuda:0') if torch.cuda.is_available()  else torch.device('cpu')
     batch_size = args.bs
     epochs = args.epochs
     if not os.path.exists(output_dir):
@@ -390,8 +392,8 @@ def train(train_dataset, val_dataset, model, args, warmup_steps= 5000, output_di
             ####
             loss = nnf.cross_entropy(logits.reshape(-1, logits.shape[-1]), tokens.to(torch.long).flatten(), ignore_index=0)
             loss_meter.update(loss.item(), tokens.shape[0])
-            loss.backward()
-            optimizer.step()
+            loss.backward() #gradients are calculated for all the params and stored in the tensor themselves.
+            optimizer.step()  # iterate over all model.params and update their value using their gradients [w : w - lr.grad(w)]
             
             #Calculate validation loss 
             val_loss_meter = evaluate(model, val_dataloader, val_dataset, device)
@@ -464,13 +466,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-"""
-
- Why self.caption_tokens[idx] = tokens ::::: here padding is -1
-
-validation:
-no grad training loop.
-model.eval
-
-"""
 

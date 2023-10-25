@@ -1,0 +1,37 @@
+program: "train.py"
+method: "grid"
+metric:
+  name: "val_loss"
+  goal: "minimize"
+parameters:
+    criterion:
+      value: "ce"
+    gpu_id:
+      value: 0
+    lr:
+      value: 2e-5
+    num_epochs:
+      value: 10
+    optimizer:
+      value: AdamW
+    prefix_length :
+      value : 10
+    prefix_dim :
+      value : 1024
+    batch :
+      value : 40
+    only_projection :
+      value :  False
+    num_layers :
+      values : [6,8]
+    normalize_prefix :
+      value : True 
+    train_data :
+      value :  '/ssd_scratch/cvit/manu/clip_cap/oscar_split_RN50_train.pkl'
+    val_data :
+      value : '/ssd_scratch/cvit/manu/clip_cap/oscar_split_RN50_val.pkl'
+    out_dir :
+      value :  '/ssd_scratch/cvit/manu/clip_cap_manu/checkpoints/num_layer_sweep'
+
+
+
