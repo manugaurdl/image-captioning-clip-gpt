@@ -1,0 +1,44 @@
+#static variables
+gpu_id: 0
+
+# Hyperparams
+lr : 2e-5
+optimizer: "AdamW"
+num_epochs: 10
+prefix_length : 10
+prefix_dim : 768
+batch_size : 32
+num_layers : 6
+warmup_steps : 5000
+
+#Model 
+tokenizer : "gpt2"
+#Validation 
+entry_count : 1
+max_length : 67  # maximum number of words
+top_p : 0.8
+temp : 1
+stop_token : '.'
+
+#Boolean variables
+logging : True
+save_ckpt : False
+normalize_prefix : True 
+use_beam_search: False
+
+# wandb related variables
+wandb : 
+  sweep : False
+  sweep_id: ""
+  sweep_run_count : 100
+  entity : "manugaur"
+  project : "img_cap_self_retrieval"
+  run_name : "siglip_baseline"
+
+# Path variables
+train_data : '/ssd_scratch/cvit/manu/clip_cap/siglip_train_emb.pkl'
+val_data : '/ssd_scratch/cvit/manu/clip_cap/siglip_val_emb.pkl'
+out_dir : '/ssd_scratch/cvit/manu/img_cap_self_retrieval/checkpoints/'
+
+
+
